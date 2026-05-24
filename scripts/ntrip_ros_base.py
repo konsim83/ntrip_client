@@ -7,6 +7,7 @@ import importlib.util
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Header
 from nmea_msgs.msg import Sentence
 from sensor_msgs.msg import NavSatFix
@@ -19,14 +20,22 @@ from ntrip_client.nmea_parser import NMEAParser, NMEA_DEFAULT_MAX_LENGTH, NMEA_D
 # Try to import a couple different types of RTCM messages
 _MAVROS_MSGS_NAME = "mavros_msgs"
 _RTCM_MSGS_NAME = "rtcm_msgs"
+_PX4_MSGS_NAME = "px4_msgs"
+_PX4_GPS_INJECT_DATA_TOPIC = '/fmu/in/gps_inject_data'
+_PX4_GPS_INJECT_DATA_MAX_LEN = 300
+_PX4_GPS_INJECT_DATA_FRAGMENTED = 1
 have_mavros_msgs = False
 have_rtcm_msgs = False
+have_px4_msgs = False
 if importlib.util.find_spec(_MAVROS_MSGS_NAME) is not None:
   have_mavros_msgs = True
   from mavros_msgs.msg import RTCM as mavros_msgs_RTCM
 if importlib.util.find_spec(_RTCM_MSGS_NAME) is not None:
   have_rtcm_msgs = True
   from rtcm_msgs.msg import Message as rtcm_msgs_RTCM
+if importlib.util.find_spec(_PX4_MSGS_NAME) is not None:
+  have_px4_msgs = True
+  from px4_msgs.msg import GpsInjectData as px4_msgs_GpsInjectData
 
 class NTRIPRosBase(Node):
   def __init__(self, name):
@@ -45,6 +54,7 @@ class NTRIPRosBase(Node):
         ('nmea_max_length', NMEA_DEFAULT_MAX_LENGTH),
         ('nmea_min_length', NMEA_DEFAULT_MIN_LENGTH),
         ('rtcm_message_package', _MAVROS_MSGS_NAME),
+        ('px4_gps_device_id', 0),
         ('reconnect_attempt_max', NTRIPBase.DEFAULT_RECONNECT_ATTEMPT_MAX),
         ('reconnect_attempt_wait_seconds', NTRIPBase.DEFAULT_RECONNECT_ATEMPT_WAIT_SECONDS),
       ]
@@ -56,26 +66,43 @@ class NTRIPRosBase(Node):
 
     # Read an optional Frame ID from the config
     self._rtcm_frame_id = self.get_parameter('rtcm_frame_id').value
+    self._px4_gps_device_id = self.get_parameter('px4_gps_device_id').value
+
+    self._rtcm_topic = 'rtcm'
+    self._rtcm_qos = 10
 
     # Determine the type of RTCM message that will be published
     rtcm_message_package = self.get_parameter('rtcm_message_package').value
     if rtcm_message_package == _MAVROS_MSGS_NAME:
       if have_mavros_msgs:
         self._rtcm_message_type = mavros_msgs_RTCM
-        self._create_rtcm_message = self._create_mavros_msgs_rtcm_message
+        self._create_rtcm_messages = self._create_mavros_msgs_rtcm_messages
       else:
         self.get_logger().fatal('The requested RTCM package {} is a valid option, but we were unable to import it. Please make sure you have it installed'.format(rtcm_message_package))
     elif rtcm_message_package == _RTCM_MSGS_NAME:
       if have_rtcm_msgs:
         self._rtcm_message_type = rtcm_msgs_RTCM
-        self._create_rtcm_message = self._create_rtcm_msgs_rtcm_message
+        self._create_rtcm_messages = self._create_rtcm_msgs_rtcm_messages
+      else:
+        self.get_logger().fatal('The requested RTCM package {} is a valid option, but we were unable to import it. Please make sure you have it installed'.format(rtcm_message_package))
+    elif rtcm_message_package == _PX4_MSGS_NAME:
+      if have_px4_msgs:
+        self._rtcm_message_type = px4_msgs_GpsInjectData
+        self._create_rtcm_messages = self._create_px4_msgs_rtcm_messages
+        self._rtcm_topic = _PX4_GPS_INJECT_DATA_TOPIC
+        self._rtcm_qos = QoSProfile(
+          history=HistoryPolicy.KEEP_LAST,
+          depth=10,
+          reliability=ReliabilityPolicy.BEST_EFFORT,
+          durability=DurabilityPolicy.VOLATILE,
+        )
       else:
         self.get_logger().fatal('The requested RTCM package {} is a valid option, but we were unable to import it. Please make sure you have it installed'.format(rtcm_message_package))
     else:
-      self.get_logger().fatal('The RTCM package {} is not a valid option. Please choose between the following packages {}'.format(rtcm_message_package, ','.join([_MAVROS_MSGS_NAME, _RTCM_MSGS_NAME])))
+      self.get_logger().fatal('The RTCM package {} is not a valid option. Please choose between the following packages {}'.format(rtcm_message_package, ','.join([_MAVROS_MSGS_NAME, _RTCM_MSGS_NAME, _PX4_MSGS_NAME])))
 
     # Setup the RTCM publisher
-    self._rtcm_pub = self.create_publisher(self._rtcm_message_type, 'rtcm', 10)
+    self._rtcm_pub = self.create_publisher(self._rtcm_message_type, self._rtcm_topic, self._rtcm_qos)
 
     # Initialize the client
     self._client = NTRIPBase(
@@ -162,22 +189,48 @@ class NTRIPRosBase(Node):
 
   def publish_rtcm(self):
     for raw_rtcm in self._client.recv_rtcm():
-      self._rtcm_pub.publish(self._create_rtcm_message(raw_rtcm))
+      for rtcm_message in self._create_rtcm_messages(raw_rtcm):
+        self._rtcm_pub.publish(rtcm_message)
 
-  def _create_mavros_msgs_rtcm_message(self, rtcm):
-    return mavros_msgs_RTCM(
+  def _create_mavros_msgs_rtcm_messages(self, rtcm):
+    return [mavros_msgs_RTCM(
       header=Header(
         stamp=self.get_clock().now().to_msg(),
         frame_id=self._rtcm_frame_id
       ),
       data=rtcm
-    )
+    )]
 
-  def _create_rtcm_msgs_rtcm_message(self, rtcm):
-    return rtcm_msgs_RTCM(
+  def _create_rtcm_msgs_rtcm_messages(self, rtcm):
+    return [rtcm_msgs_RTCM(
       header=Header(
         stamp=self.get_clock().now().to_msg(),
         frame_id=self._rtcm_frame_id
       ),
       message=rtcm
-    )
+    )]
+
+  def _create_px4_msgs_rtcm_messages(self, rtcm):
+    rtcm_data = bytes(rtcm)
+    if not rtcm_data:
+      return []
+
+    fragmented = len(rtcm_data) > _PX4_GPS_INJECT_DATA_MAX_LEN
+    flags = _PX4_GPS_INJECT_DATA_FRAGMENTED if fragmented else 0
+    messages = []
+
+    for offset in range(0, len(rtcm_data), _PX4_GPS_INJECT_DATA_MAX_LEN):
+      chunk = list(rtcm_data[offset:offset + _PX4_GPS_INJECT_DATA_MAX_LEN])
+      chunk_data = [0] * _PX4_GPS_INJECT_DATA_MAX_LEN
+      chunk_data[:len(chunk)] = chunk
+      messages.append(
+        px4_msgs_GpsInjectData(
+          timestamp=int(self.get_clock().now().nanoseconds / 1000),
+          device_id=self._px4_gps_device_id,
+          len=len(chunk),
+          flags=flags,
+          data=chunk_data,
+        )
+      )
+
+    return messages
