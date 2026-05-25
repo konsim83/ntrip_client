@@ -77,6 +77,7 @@ class NTRIPRosBase(Node):
     self._rtcm_qos = 10
     self._fix_message_type = NavSatFix
     self._fix_callback = self.subscribe_fix
+    self._px4_fix_timestamp = None
     self._px4_fix_timestamp_sample = None
     self._px4_fix_device_id = None
 
@@ -206,6 +207,7 @@ class NTRIPRosBase(Node):
     self._send_gga(timestamp_secs, fix.latitude, fix.longitude, nmea_status)
 
   def subscribe_px4_sensor_gps(self, sensor_gps: 'sogedian_msgs_SensorGps'):
+    self._px4_fix_timestamp = sensor_gps.timestamp
     self._px4_fix_timestamp_sample = sensor_gps.timestamp_sample
     self._px4_fix_device_id = sensor_gps.device_id
 
@@ -261,7 +263,9 @@ class NTRIPRosBase(Node):
     if not rtcm_data:
       return []
 
-    if self._px4_fix_timestamp_sample is not None:
+    if self._px4_fix_timestamp is not None and self._px4_fix_timestamp > 0:
+      message_timestamp = self._px4_fix_timestamp
+    elif self._px4_fix_timestamp_sample is not None and self._px4_fix_timestamp_sample > 0:
       message_timestamp = self._px4_fix_timestamp_sample
     else:
       message_timestamp = int(self.get_clock().now().nanoseconds / 1000)
