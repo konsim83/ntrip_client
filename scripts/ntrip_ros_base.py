@@ -21,12 +21,14 @@ from ntrip_client.nmea_parser import NMEAParser, NMEA_DEFAULT_MAX_LENGTH, NMEA_D
 _MAVROS_MSGS_NAME = "mavros_msgs"
 _RTCM_MSGS_NAME = "rtcm_msgs"
 _PX4_MSGS_NAME = "px4_msgs"
+_SOGEDIAN_MSGS_NAME = "sogedian_msgs"
 _PX4_GPS_INJECT_DATA_TOPIC = '/fmu/in/gps_inject_data'
 _PX4_GPS_INJECT_DATA_MAX_LEN = 300
 _PX4_GPS_INJECT_DATA_FRAGMENTED = 1
 have_mavros_msgs = False
 have_rtcm_msgs = False
 have_px4_msgs = False
+have_sogedian_msgs = False
 if importlib.util.find_spec(_MAVROS_MSGS_NAME) is not None:
   have_mavros_msgs = True
   from mavros_msgs.msg import RTCM as mavros_msgs_RTCM
@@ -36,6 +38,9 @@ if importlib.util.find_spec(_RTCM_MSGS_NAME) is not None:
 if importlib.util.find_spec(_PX4_MSGS_NAME) is not None:
   have_px4_msgs = True
   from px4_msgs.msg import GpsInjectData as px4_msgs_GpsInjectData
+if importlib.util.find_spec(_SOGEDIAN_MSGS_NAME) is not None:
+  have_sogedian_msgs = True
+  from sogedian_msgs.msg import SensorGps as sogedian_msgs_SensorGps
 
 class NTRIPRosBase(Node):
   def __init__(self, name):
@@ -70,6 +75,10 @@ class NTRIPRosBase(Node):
 
     self._rtcm_topic = 'rtcm'
     self._rtcm_qos = 10
+    self._fix_message_type = NavSatFix
+    self._fix_callback = self.subscribe_fix
+    self._px4_fix_timestamp_sample = None
+    self._px4_fix_device_id = None
 
     # Determine the type of RTCM message that will be published
     rtcm_message_package = self.get_parameter('rtcm_message_package').value
@@ -87,15 +96,20 @@ class NTRIPRosBase(Node):
         self.get_logger().fatal('The requested RTCM package {} is a valid option, but we were unable to import it. Please make sure you have it installed'.format(rtcm_message_package))
     elif rtcm_message_package == _PX4_MSGS_NAME:
       if have_px4_msgs:
-        self._rtcm_message_type = px4_msgs_GpsInjectData
-        self._create_rtcm_messages = self._create_px4_msgs_rtcm_messages
-        self._rtcm_topic = _PX4_GPS_INJECT_DATA_TOPIC
-        self._rtcm_qos = QoSProfile(
-          history=HistoryPolicy.KEEP_LAST,
-          depth=10,
-          reliability=ReliabilityPolicy.BEST_EFFORT,
-          durability=DurabilityPolicy.VOLATILE,
-        )
+        if have_sogedian_msgs:
+          self._rtcm_message_type = px4_msgs_GpsInjectData
+          self._create_rtcm_messages = self._create_px4_msgs_rtcm_messages
+          self._rtcm_topic = _PX4_GPS_INJECT_DATA_TOPIC
+          self._rtcm_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+          )
+          self._fix_message_type = sogedian_msgs_SensorGps
+          self._fix_callback = self.subscribe_px4_sensor_gps
+        else:
+          self.get_logger().fatal('The requested RTCM package {} also requires {} so the node can subscribe to SensorGps on the PX4 path. Please make sure you have it installed'.format(rtcm_message_package, _SOGEDIAN_MSGS_NAME))
       else:
         self.get_logger().fatal('The requested RTCM package {} is a valid option, but we were unable to import it. Please make sure you have it installed'.format(rtcm_message_package))
     else:
@@ -125,7 +139,7 @@ class NTRIPRosBase(Node):
       return False
     # Setup our subscribers
     self._nmea_sub = self.create_subscription(Sentence, 'nmea', self.subscribe_nmea, 10)
-    self._fix_sub = self.create_subscription(NavSatFix, 'fix', self.subscribe_fix, 10)
+    self._fix_sub = self.create_subscription(self._fix_message_type, 'fix', self._fix_callback, 10)
 
     # Start the timer that will check for RTCM data
     self._rtcm_timer = self.create_timer(0.1, self.publish_rtcm)
@@ -144,11 +158,9 @@ class NTRIPRosBase(Node):
   def subscribe_nmea(self, nmea):
     # Just extract the NMEA from the message, and send it right to the server
     self._client.send_nmea(nmea.sentence)
-  
-  def subscribe_fix(self, fix: NavSatFix):
-    # Calculate the timestamp of the message
-    timestamp_secs = fix.header.stamp.sec + fix.header.stamp.nanosec * 1e-9
-    timestamp = datetime.datetime.fromtimestamp(timestamp_secs)
+
+  def _send_gga(self, timestamp_secs, latitude, longitude, nmea_status):
+    timestamp = datetime.datetime.utcfromtimestamp(timestamp_secs)
     time = timestamp.time()
     hour = time.hour
     minute = time.minute
@@ -159,14 +171,26 @@ class NTRIPRosBase(Node):
     # Figure out the direction of the latitude and longitude
     nmea_lat_direction = "N"
     nmea_lon_direction = "E"
-    if fix.latitude < 0:
+    if latitude < 0:
       nmea_lat_direction = "S"
-    if fix.longitude < 0:
+    if longitude < 0:
       nmea_lon_direction = "W"
-    
+
     # Convert the units of the latitude and longitude
-    nmea_lat = NMEAParser.lat_dd_to_dmm(fix.latitude)
-    nmea_lon = NMEAParser.lon_dd_to_dmm(fix.longitude)
+    nmea_lat = NMEAParser.lat_dd_to_dmm(latitude)
+    nmea_lon = NMEAParser.lon_dd_to_dmm(longitude)
+
+    # Assemble the sentence
+    nmea_sentence_no_checksum = f"$GPGGA,{nmea_utc},{nmea_lat},{nmea_lat_direction},{nmea_lon},{nmea_lon_direction},{nmea_status},05,1.0,100.0,M,-32.0,M,,0000"
+    nmea_checksum = NMEAParser.checksum(nmea_sentence_no_checksum)
+    nmea_sentence = f"{nmea_sentence_no_checksum}*{nmea_checksum:x}\r\n"
+
+    # Send the sentence to the client
+    self._client.send_nmea(nmea_sentence)
+  
+  def subscribe_fix(self, fix: NavSatFix):
+    # Calculate the timestamp of the message
+    timestamp_secs = fix.header.stamp.sec + fix.header.stamp.nanosec * 1e-9
 
     # Convert the GPS quality to the right format for the sentence
     status = fix.status.status
@@ -179,13 +203,35 @@ class NTRIPRosBase(Node):
     else:
       nmea_status = 0
 
-    # Assemble the sentence
-    nmea_sentence_no_checksum = f"$GPGGA,{nmea_utc},{nmea_lat},{nmea_lat_direction},{nmea_lon},{nmea_lon_direction},{nmea_status},05,1.0,100.0,M,-32.0,M,,0000"
-    nmea_checksum = NMEAParser.checksum(nmea_sentence_no_checksum)
-    nmea_sentence = f"{nmea_sentence_no_checksum}*{nmea_checksum:x}\r\n"
+    self._send_gga(timestamp_secs, fix.latitude, fix.longitude, nmea_status)
 
-    # Send the sentence to the client
-    self._client.send_nmea(nmea_sentence)
+  def subscribe_px4_sensor_gps(self, sensor_gps: 'sogedian_msgs_SensorGps'):
+    self._px4_fix_timestamp_sample = sensor_gps.timestamp_sample
+    self._px4_fix_device_id = sensor_gps.device_id
+
+    if sensor_gps.time_utc_usec != 0:
+      timestamp_secs = sensor_gps.time_utc_usec * 1e-6
+    else:
+      timestamp_secs = sensor_gps.header.stamp.sec + sensor_gps.header.stamp.nanosec * 1e-9
+
+    fix_type = sensor_gps.fix_type
+    if fix_type == sogedian_msgs_SensorGps.FIX_TYPE_RTK_FIXED:
+      nmea_status = 4
+    elif fix_type == sogedian_msgs_SensorGps.FIX_TYPE_RTK_FLOAT:
+      nmea_status = 5
+    elif fix_type == sogedian_msgs_SensorGps.FIX_TYPE_RTCM_CODE_DIFFERENTIAL:
+      nmea_status = 2
+    elif fix_type >= sogedian_msgs_SensorGps.FIX_TYPE_2D:
+      nmea_status = 1
+    else:
+      nmea_status = 0
+
+    self._send_gga(
+      timestamp_secs,
+      sensor_gps.latitude_deg,
+      sensor_gps.longitude_deg,
+      nmea_status,
+    )
 
   def publish_rtcm(self):
     for raw_rtcm in self._client.recv_rtcm():
@@ -215,6 +261,16 @@ class NTRIPRosBase(Node):
     if not rtcm_data:
       return []
 
+    if self._px4_fix_timestamp_sample is not None:
+      message_timestamp = self._px4_fix_timestamp_sample
+    else:
+      message_timestamp = int(self.get_clock().now().nanoseconds / 1000)
+
+    if self._px4_fix_device_id is not None:
+      device_id = self._px4_fix_device_id
+    else:
+      device_id = self._px4_gps_device_id
+
     fragmented = len(rtcm_data) > _PX4_GPS_INJECT_DATA_MAX_LEN
     flags = _PX4_GPS_INJECT_DATA_FRAGMENTED if fragmented else 0
     messages = []
@@ -225,8 +281,8 @@ class NTRIPRosBase(Node):
       chunk_data[:len(chunk)] = chunk
       messages.append(
         px4_msgs_GpsInjectData(
-          timestamp=int(self.get_clock().now().nanoseconds / 1000),
-          device_id=self._px4_gps_device_id,
+          timestamp=message_timestamp,
+          device_id=device_id,
           len=len(chunk),
           flags=flags,
           data=chunk_data,
