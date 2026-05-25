@@ -10,6 +10,8 @@ def generate_launch_description():
           DeclareLaunchArgument('namespace',             default_value='/'),
           DeclareLaunchArgument('node_name',             default_value='ntrip_client'),
           DeclareLaunchArgument('debug',                 default_value='false'),
+          DeclareLaunchArgument('nmea_topic',            default_value='nmea'),
+          DeclareLaunchArgument('fix_topic',             default_value='fix'),
           DeclareLaunchArgument('host',                  default_value='4G.sapos-lsa-ntrip.de'),
           DeclareLaunchArgument('port',                  default_value='2101'),
           DeclareLaunchArgument('mountpoint',            default_value='VRS_3_4G_ST'),
@@ -83,9 +85,9 @@ def generate_launch_description():
                     'rtcm_timeout_seconds': 4
                   }
                 ],
-                # Uncomment the following section and replace "/gx5/nmea/sentence" with the topic you are sending NMEA on if it is not the one we requested
-                #remappings=[
-                #  ("nmea", "/gx5/nmea/sentence")
-                #],
+                remappings=[
+                  ('nmea', LaunchConfiguration('nmea_topic')),
+                  ('fix', LaunchConfiguration('fix_topic')),
+                ],
           )
       ])
