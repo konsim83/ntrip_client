@@ -10,18 +10,21 @@ def generate_launch_description():
           DeclareLaunchArgument('namespace',             default_value='/'),
           DeclareLaunchArgument('node_name',             default_value='ntrip_client'),
           DeclareLaunchArgument('debug',                 default_value='false'),
-          DeclareLaunchArgument('host',                  default_value='20.185.11.35'),
+          DeclareLaunchArgument('nmea_topic',            default_value='nmea'),
+          DeclareLaunchArgument('fix_topic',             default_value='sogedian/vehicle_gps_position'),
+          DeclareLaunchArgument('host',                  default_value='4G.sapos-lsa-ntrip.de'),
           DeclareLaunchArgument('port',                  default_value='2101'),
-          DeclareLaunchArgument('mountpoint',            default_value='VRS_RTCM3'),
+          DeclareLaunchArgument('mountpoint',            default_value='VRS_3_4G_ST'),
           DeclareLaunchArgument('ntrip_version',         default_value='None'),
           DeclareLaunchArgument('authenticate',          default_value='True'),
           DeclareLaunchArgument('username',              default_value='user'),
-          DeclareLaunchArgument('password',              default_value='pass'),
+          DeclareLaunchArgument('password',              default_value='user'),
           DeclareLaunchArgument('ssl',                   default_value='False'),
           DeclareLaunchArgument('cert',                  default_value='None'),
           DeclareLaunchArgument('key',                   default_value='None'),
           DeclareLaunchArgument('ca_cert',               default_value='None'),
-          DeclareLaunchArgument('rtcm_message_package',  default_value='rtcm_msgs'),
+          DeclareLaunchArgument('rtcm_message_package',  default_value='px4_msgs'),
+          DeclareLaunchArgument('rtcm_injector_device_id', default_value='0'),
 
           # Pass an environment variable to the node
           SetEnvironmentVariable(name='NTRIP_CLIENT_DEBUG', value=LaunchConfiguration('debug')),
@@ -71,6 +74,9 @@ def generate_launch_description():
                     # Use this parameter to change the type of RTCM message published by the node. Defaults to "mavros_msgs", but we also support "rtcm_msgs"
                     'rtcm_message_package': LaunchConfiguration('rtcm_message_package'),
 
+                    # device_id of the RTCM injector (source). Must NOT equal the GPS receiver's own device_id, or PX4 drops the injection. Default 0 = broadcast to all GPS instances.
+                    'rtcm_injector_device_id': LaunchConfiguration('rtcm_injector_device_id'),
+
                     # Will affect how many times the node will attempt to reconnect before exiting, and how long it will wait in between attempts when a reconnect occurs
                     'reconnect_attempt_max': 10,
                     'reconnect_attempt_wait_seconds': 5,
@@ -79,9 +85,9 @@ def generate_launch_description():
                     'rtcm_timeout_seconds': 4
                   }
                 ],
-                # Uncomment the following section and replace "/gx5/nmea/sentence" with the topic you are sending NMEA on if it is not the one we requested
-                #remappings=[
-                #  ("nmea", "/gx5/nmea/sentence")
-                #],
+                remappings=[
+                  ('nmea', LaunchConfiguration('nmea_topic')),
+                  ('fix', LaunchConfiguration('fix_topic')),
+                ],
           )
       ])
