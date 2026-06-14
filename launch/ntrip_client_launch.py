@@ -24,7 +24,7 @@ def generate_launch_description():
           DeclareLaunchArgument('key',                   default_value='None'),
           DeclareLaunchArgument('ca_cert',               default_value='None'),
           DeclareLaunchArgument('rtcm_message_package',  default_value='px4_msgs'),
-          DeclareLaunchArgument('px4_gps_device_id',     default_value='0'),
+          DeclareLaunchArgument('rtcm_injector_device_id', default_value='0'),
 
           # Pass an environment variable to the node
           SetEnvironmentVariable(name='NTRIP_CLIENT_DEBUG', value=LaunchConfiguration('debug')),
@@ -74,8 +74,8 @@ def generate_launch_description():
                     # Use this parameter to change the type of RTCM message published by the node. Defaults to "mavros_msgs", but we also support "rtcm_msgs"
                     'rtcm_message_package': LaunchConfiguration('rtcm_message_package'),
 
-                    # PX4 GPS injection uses device_id to choose the GPS receiver instance. Default to 0.
-                    'px4_gps_device_id': LaunchConfiguration('px4_gps_device_id'),
+                    # device_id of the RTCM injector (source). Must NOT equal the GPS receiver's own device_id, or PX4 drops the injection. Default 0 = broadcast to all GPS instances.
+                    'rtcm_injector_device_id': LaunchConfiguration('rtcm_injector_device_id'),
 
                     # Will affect how many times the node will attempt to reconnect before exiting, and how long it will wait in between attempts when a reconnect occurs
                     'reconnect_attempt_max': 10,

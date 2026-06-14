@@ -59,7 +59,7 @@ class NTRIPRosBase(Node):
         ('nmea_max_length', NMEA_DEFAULT_MAX_LENGTH),
         ('nmea_min_length', NMEA_DEFAULT_MIN_LENGTH),
         ('rtcm_message_package', _MAVROS_MSGS_NAME),
-        ('px4_gps_device_id', 0),
+        ('rtcm_injector_device_id', 0),
         ('reconnect_attempt_max', NTRIPBase.DEFAULT_RECONNECT_ATTEMPT_MAX),
         ('reconnect_attempt_wait_seconds', NTRIPBase.DEFAULT_RECONNECT_ATEMPT_WAIT_SECONDS),
       ]
@@ -71,7 +71,7 @@ class NTRIPRosBase(Node):
 
     # Read an optional Frame ID from the config
     self._rtcm_frame_id = self.get_parameter('rtcm_frame_id').value
-    self._px4_gps_device_id = self.get_parameter('px4_gps_device_id').value
+    self._rtcm_injector_device_id = self.get_parameter('rtcm_injector_device_id').value
 
     self._rtcm_topic = 'rtcm'
     self._rtcm_qos = 10
@@ -79,7 +79,6 @@ class NTRIPRosBase(Node):
     self._fix_callback = self.subscribe_fix
     self._px4_fix_timestamp = None
     self._px4_fix_timestamp_sample = None
-    self._px4_fix_device_id = None
 
     # Determine the type of RTCM message that will be published
     rtcm_message_package = self.get_parameter('rtcm_message_package').value
@@ -209,7 +208,6 @@ class NTRIPRosBase(Node):
   def subscribe_px4_sensor_gps(self, sensor_gps: 'sogedian_msgs_SensorGps'):
     self._px4_fix_timestamp = sensor_gps.timestamp
     self._px4_fix_timestamp_sample = sensor_gps.timestamp_sample
-    self._px4_fix_device_id = sensor_gps.device_id
 
     if sensor_gps.time_utc_usec != 0:
       timestamp_secs = sensor_gps.time_utc_usec * 1e-6
@@ -270,10 +268,12 @@ class NTRIPRosBase(Node):
     else:
       message_timestamp = int(self.get_clock().now().nanoseconds / 1000)
 
-    if self._px4_fix_device_id is not None:
-      device_id = self._px4_fix_device_id
-    else:
-      device_id = self._px4_gps_device_id
+    # The inject device_id identifies the RTCM injector (source), and must NOT
+    # match the receiver's own device_id: PX4's GPS driver discards inject data
+    # whose device_id equals the receiver id (self-injection guard), which
+    # leaves rtcm_msg_used at 0. Use the configured rtcm_injector_device_id
+    # (0 = broadcast to all GPS instances).
+    device_id = self._rtcm_injector_device_id
 
     fragmented = len(rtcm_data) > _PX4_GPS_INJECT_DATA_MAX_LEN
     flags = _PX4_GPS_INJECT_DATA_FRAGMENTED if fragmented else 0
